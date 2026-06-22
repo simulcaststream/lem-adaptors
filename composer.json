@@ -1,0 +1,13 @@
+{
+    "name": "live-event-manager/lem-adaptors",
+    "description": "Streaming and payment provider adaptors for Live Event Manager",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=7.4",
+        "stripe/stripe-php": "^10.0"
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}
