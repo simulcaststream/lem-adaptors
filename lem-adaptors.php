@@ -6,11 +6,28 @@
  * Author: Simulcast
  * License: GPL v2 or later
  * Text Domain: lem-adaptors
- * Requires Plugins: live-event-manager
  */
 
 if (!defined('ABSPATH')) {
     exit;
+}
+
+/**
+ * Whether Live Event Manager is installed and active.
+ *
+ * WordPress "Requires Plugins" only resolves plugins hosted on WordPress.org,
+ * so we check the core plugin directly (folder: live-event-manager).
+ */
+function lem_adaptors_is_core_active(): bool {
+    if (defined('LEM_VERSION')) {
+        return true;
+    }
+
+    if (!function_exists('is_plugin_active')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+
+    return is_plugin_active('live-event-manager/live-event-manager.php');
 }
 
 /**
@@ -73,7 +90,40 @@ add_action('plugins_loaded', function () {
     add_action('wp_ajax_lem_paypal_capture', array('LEM_PayPal_Capture', 'handle'));
 }, 20);
 
+add_action('admin_notices', function () {
+    if (!is_admin() || lem_adaptors_is_core_active()) {
+        return;
+    }
+
+    if (!function_exists('get_current_screen')) {
+        return;
+    }
+
+    $screen = get_current_screen();
+    if (!$screen || $screen->base !== 'plugins') {
+        return;
+    }
+
+    echo '<div class="notice notice-error"><p>';
+    echo esc_html__(
+        'LEM Adaptors requires Live Event Manager to be installed and active (plugin folder: live-event-manager).',
+        'lem-adaptors'
+    );
+    echo '</p></div>';
+});
+
 register_activation_hook(__FILE__, function () {
+    if (!lem_adaptors_is_core_active()) {
+        deactivate_plugins(plugin_basename(__FILE__));
+        wp_die(
+            wp_kses_post(
+                __('LEM Adaptors requires <strong>Live Event Manager</strong> to be installed and active first.', 'lem-adaptors')
+            ),
+            esc_html__('Plugin Activation Error', 'lem-adaptors'),
+            array('back_link' => true)
+        );
+    }
+
     $settings = get_option('lem_settings', array());
     if (!is_array($settings)) {
         $settings = array();
