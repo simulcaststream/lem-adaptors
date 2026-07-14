@@ -1,10 +1,13 @@
 <?php
 /**
  * Plugin Name: LEM Adaptors
+ * Plugin URI: https://github.com/simulcaststream/wp-lem-adaptors
  * Description: Official adaptors for Live Event Manager: Mux, OME, Stripe, PayPal, and Ably chat.
  * Version: 1.0.0
+ * Requires Plugins: live-event-manager
  * Author: Simulcast
- * License: GPL v2 or later
+ * License: GPLv2 or later
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: lem-adaptors
  */
 
@@ -31,16 +34,16 @@ function lem_adaptors_is_core_active(): bool {
 }
 
 /**
- * Load Composer dependencies (Stripe SDK). Falls back to core vendor when present.
+ * Load Composer dependencies (Stripe PHP SDK).
  */
 function lem_adaptors_load_dependencies(): void {
     if (file_exists(__DIR__ . '/vendor/autoload.php')) {
         require_once __DIR__ . '/vendor/autoload.php';
-        return;
     }
-    if (defined('LEM_PLUGIN_DIR') && file_exists(LEM_PLUGIN_DIR . 'vendor/autoload.php')) {
-        require_once LEM_PLUGIN_DIR . 'vendor/autoload.php';
-    }
+}
+
+function lem_adaptors_has_stripe_sdk(): bool {
+    return class_exists('\Stripe\Stripe');
 }
 
 lem_adaptors_load_dependencies();
@@ -91,25 +94,36 @@ add_action('plugins_loaded', function () {
 }, 20);
 
 add_action('admin_notices', function () {
-    if (!is_admin() || lem_adaptors_is_core_active()) {
+    if (!is_admin() || !current_user_can('activate_plugins')) {
         return;
     }
 
-    if (!function_exists('get_current_screen')) {
+    if (!lem_adaptors_is_core_active()) {
+        if (!function_exists('get_current_screen')) {
+            return;
+        }
+        $screen = get_current_screen();
+        if (!$screen || $screen->base !== 'plugins') {
+            return;
+        }
+
+        echo '<div class="notice notice-error"><p>';
+        echo esc_html__(
+            'LEM Adaptors requires Live Event Manager to be installed and active (plugin folder: live-event-manager).',
+            'lem-adaptors'
+        );
+        echo '</p></div>';
         return;
     }
 
-    $screen = get_current_screen();
-    if (!$screen || $screen->base !== 'plugins') {
-        return;
+    if (!lem_adaptors_has_stripe_sdk()) {
+        echo '<div class="notice notice-warning"><p>';
+        echo esc_html__(
+            'LEM Adaptors: Stripe PHP SDK not found. Run composer install in the lem-adaptors plugin directory, or use a release ZIP that includes vendor/.',
+            'lem-adaptors'
+        );
+        echo '</p></div>';
     }
-
-    echo '<div class="notice notice-error"><p>';
-    echo esc_html__(
-        'LEM Adaptors requires Live Event Manager to be installed and active (plugin folder: live-event-manager).',
-        'lem-adaptors'
-    );
-    echo '</p></div>';
 });
 
 register_activation_hook(__FILE__, function () {
@@ -159,10 +173,10 @@ register_activation_hook(__FILE__, function () {
 
         // PayPal
         'paypal_mode'              => 'sandbox',
-        'paypal_sandbox_client_id' => '',
-        'paypal_sandbox_secret'    => '',
-        'paypal_live_client_id'    => '',
-        'paypal_live_secret'       => '',
+        'paypal_sandbox_client_id'     => '',
+        'paypal_sandbox_client_secret' => '',
+        'paypal_live_client_id'        => '',
+        'paypal_live_client_secret'    => '',
         'paypal_webhook_id'        => '',
         'paypal_currency'          => 'USD',
 
@@ -170,6 +184,14 @@ register_activation_hook(__FILE__, function () {
         'chat_provider' => 'ably',
         'ably_api_key'  => '',
     );
+
+    // Migrate legacy PayPal secret option keys (pre-1.0.0 activation defaults).
+    if (empty($settings['paypal_sandbox_client_secret']) && !empty($settings['paypal_sandbox_secret'])) {
+        $settings['paypal_sandbox_client_secret'] = $settings['paypal_sandbox_secret'];
+    }
+    if (empty($settings['paypal_live_client_secret']) && !empty($settings['paypal_live_secret'])) {
+        $settings['paypal_live_client_secret'] = $settings['paypal_live_secret'];
+    }
 
     update_option('lem_settings', $settings);
 });

@@ -2,4 +2,6 @@
 .idea/
 .vscode/
 *.log
+
+# Stripe SDK — run `composer install` before release (GitHub blocks vendor/README example keys).
 /vendor/
