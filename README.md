@@ -1,8 +1,8 @@
 # LEM Adaptors
 
-Official open-source adaptors for **[Live Event Manager](https://github.com/simulcaststream/wp-live-event-manager)** (core v1.2.0+).
+Official open-source adaptors for **[Live Event Manager](https://github.com/simulcaststream/live-event-manager)** (core v1.2.0+).
 
-**Repository:** [github.com/simulcaststream/wp-lem-adaptors](https://github.com/simulcaststream/wp-lem-adaptors)
+**Repository:** [github.com/simulcaststream/lem-adaptors](https://github.com/simulcaststream/lem-adaptors)
 
 Registers all built-in providers on `plugins_loaded` (priority 20):
 
@@ -19,7 +19,7 @@ Configure credentials under **Live Events → Services** (or **Vendors**). Confi
 ## Requirements
 
 - WordPress 5.0+, **PHP 8.0+**
-- **[Live Event Manager](https://github.com/simulcaststream/wp-live-event-manager)** 1.2.0+ (activate first)
+- **[Live Event Manager](https://github.com/simulcaststream/live-event-manager)** 1.2.0+ (activate first)
 - Provider accounts as needed (Mux, OME, Stripe, PayPal, Ably)
 
 ## Install
@@ -32,7 +32,7 @@ Configure credentials under **Live Events → Services** (or **Vendors**). Confi
 ## Local WordPress (symlink)
 
 ```bash
-ln -sf ~/Documents/github/wp-lem-adaptors \
+ln -sf ~/Documents/github/lem-adaptors \
   "~/Local Sites/your-site/app/public/wp-content/plugins/lem-adaptors"
 ```
 
@@ -50,7 +50,7 @@ Provider classes are lazy-loaded via core filters:
 - `lem_payment_provider_class_file`
 - `lem_chat_provider_class_file`
 
-See [EXTENDING.md](https://github.com/simulcaststream/wp-live-event-manager/blob/main/EXTENDING.md) in the core repo.
+See [EXTENDING.md](https://github.com/simulcaststream/live-event-manager/blob/main/EXTENDING.md) in the core repo.
 
 ## License
 

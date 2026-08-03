@@ -1,10 +1,9 @@
 <?php
 /**
  * Plugin Name: LEM Adaptors
- * Plugin URI: https://github.com/simulcaststream/wp-lem-adaptors
+ * Plugin URI: https://github.com/simulcaststream/lem-adaptors
  * Description: Official adaptors for Live Event Manager: Mux, OME, Stripe, PayPal, and Ably chat.
  * Version: 1.0.0
- * Requires Plugins: live-event-manager
  * Author: Simulcast
  * License: GPLv2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -18,19 +17,55 @@ if (!defined('ABSPATH')) {
 /**
  * Whether Live Event Manager is installed and active.
  *
- * WordPress "Requires Plugins" only resolves plugins hosted on WordPress.org,
- * so we check the core plugin directly (folder: live-event-manager).
+ * Deliberately does NOT use the "Requires Plugins" header, and does not assume a
+ * folder name. WordPress resolves that header by installed directory name alone,
+ * so a core plugin unpacked as "wp-live-event-manager" (the repo name, which is
+ * what a GitHub zip produces) reads as missing and WordPress blocks activation
+ * outright — before this plugin can say anything useful. The header is also
+ * intended for wordpress.org-hosted plugins, which this is not.
+ *
+ * Detection order: the constant the core plugin defines, then its main class,
+ * then a scan of installed plugins by header rather than by path.
  */
 function lem_adaptors_is_core_active(): bool {
-    if (defined('LEM_VERSION')) {
+    if (defined('LEM_VERSION') || class_exists('LiveEventManager')) {
         return true;
     }
 
-    if (!function_exists('is_plugin_active')) {
+    // Reached from the activation hook, where core may not be loaded yet.
+    if (!function_exists('get_plugins')) {
         require_once ABSPATH . 'wp-admin/includes/plugin.php';
     }
 
-    return is_plugin_active('live-event-manager/live-event-manager.php');
+    foreach (get_plugins() as $file => $data) {
+        if (($data['Name'] ?? '') !== 'Live Event Manager') {
+            continue;
+        }
+        if (is_plugin_active($file)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Path of the installed core plugin, whatever its folder is called.
+ *
+ * @return string Plugin file relative to the plugins directory, or '' if absent.
+ */
+function lem_adaptors_core_plugin_file(): string {
+    if (!function_exists('get_plugins')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+
+    foreach (get_plugins() as $file => $data) {
+        if (($data['Name'] ?? '') === 'Live Event Manager') {
+            return $file;
+        }
+    }
+
+    return '';
 }
 
 /**
@@ -107,11 +142,27 @@ add_action('admin_notices', function () {
             return;
         }
 
-        echo '<div class="notice notice-error"><p>';
-        echo esc_html__(
-            'LEM Adaptors requires Live Event Manager to be installed and active (plugin folder: live-event-manager).',
-            'lem-adaptors'
-        );
+        $core_file = lem_adaptors_core_plugin_file();
+
+        echo '<div class="notice notice-error"><p><strong>';
+        echo esc_html__('LEM Adaptors:', 'lem-adaptors');
+        echo '</strong> ';
+
+        if ($core_file !== '') {
+            // Installed but inactive — give them the one-click fix.
+            $activate_url = wp_nonce_url(
+                self_admin_url('plugins.php?action=activate&plugin=' . rawurlencode($core_file)),
+                'activate-plugin_' . $core_file
+            );
+            echo esc_html__('Live Event Manager is installed but not active. Adaptors do nothing until it is running.', 'lem-adaptors');
+            echo ' <a href="' . esc_url($activate_url) . '">' . esc_html__('Activate Live Event Manager', 'lem-adaptors') . '</a>';
+        } else {
+            echo esc_html__('Live Event Manager is not installed. Adaptors register providers with it and do nothing on their own.', 'lem-adaptors');
+            echo ' <a href="https://github.com/simulcaststream/live-event-manager" target="_blank" rel="noopener">';
+            echo esc_html__('Get Live Event Manager', 'lem-adaptors');
+            echo '</a>';
+        }
+
         echo '</p></div>';
         return;
     }
