@@ -12,7 +12,7 @@ Official streaming, payment, and chat providers for Live Event Manager.
 
 == Description ==
 
-LEM Adaptors registers the built-in providers for **[Live Event Manager](https://github.com/simulcaststream/wp-live-event-manager)** core:
+LEM Adaptors registers the built-in providers for **[Live Event Manager](https://github.com/simulcaststream/live-event-manager)** core:
 
 * **Mux** and **OvenMediaEngine (OME)** — streaming
 * **Stripe** and **PayPal** — payments
