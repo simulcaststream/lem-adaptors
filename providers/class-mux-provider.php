@@ -16,9 +16,10 @@ if (!defined('ABSPATH')) {
 
 if (defined('LEM_PLUGIN_DIR')) {
     require_once LEM_PLUGIN_DIR . 'services/streaming/class-streaming-provider-interface.php';
+    require_once LEM_PLUGIN_DIR . 'services/streaming/class-abstract-streaming-provider.php';
 }
 
-class LEM_Mux_Provider implements LEM_Streaming_Provider_Interface {
+class LEM_Mux_Provider extends LEM_Abstract_Streaming_Provider {
 
     private const API_BASE = 'https://api.mux.com/video/v1';
 
@@ -121,31 +122,46 @@ class LEM_Mux_Provider implements LEM_Streaming_Provider_Interface {
             return false;
         }
 
+        // Token lifetime is the event's, and only the event's. There is no
+        // "default expiry" fallback: an event without a valid start and end
+        // cannot mint at all, and core refuses before reaching this method.
+        $exp = LEM_Event_Window::token_expiry($event_id);
+        if (!$exp) {
+            $this->plugin->last_jwt_error = 'Event ' . $event_id . ' has no valid start/end, so no token lifetime can be derived.';
+            $this->debug_log('generate_playback_token: ' . $this->plugin->last_jwt_error);
+            return false;
+        }
+
         if ($is_refresh) {
             $this->plugin->invalidate_existing_tokens($email, $event_id);
         } else {
             global $wpdb;
             $table    = $wpdb->prefix . 'lem_jwt_tokens';
+            // Only rows that actually carry a token are reusable. Entitlement
+            // rows (jwt_token NULL, written at purchase) must fall through to
+            // minting, otherwise the viewer gets handed an empty token.
+            // Compared in UTC — expires_at is written with gmdate().
             $existing = $wpdb->get_row($wpdb->prepare(
                 "SELECT * FROM $table
-                 WHERE email      = %s
-                   AND event_id   = %s
+                 WHERE LOWER(email) = %s
+                   AND event_id     = %s
                    AND revoked_at IS NULL
+                   AND jwt_token IS NOT NULL AND jwt_token != ''
                    AND expires_at > %s
                  ORDER BY created_at DESC
                  LIMIT 1",
-                $email,
-                $event_id,
-                current_time('mysql')
+                strtolower($email),
+                (string) intval($event_id),
+                gmdate('Y-m-d H:i:s')
             ));
 
             if ($existing) {
-                $exp_ts = strtotime($existing->expires_at);
+                $exp_ts = strtotime($existing->expires_at . ' UTC');
                 $this->plugin->store_playback_blob($email, $event_id, array(
                     'vendor'  => 'mux',
                     'mux_jwt' => $existing->jwt_token,
                     'jti'     => $existing->jti,
-                ), $exp_ts ? $exp_ts : time() + DAY_IN_SECONDS);
+                ), $exp_ts ? $exp_ts : $exp);
 
                 return array(
                     'jwt'        => $existing->jwt_token,
@@ -155,20 +171,6 @@ class LEM_Mux_Provider implements LEM_Streaming_Provider_Interface {
                     'vendor'     => 'mux',
                 );
             }
-        }
-
-        $event_end_str = $event->event_end ?? '';
-        if (!empty($event_end_str)) {
-            $end_ts = strtotime($event_end_str);
-            if ($end_ts && $end_ts > time()) {
-                $exp = $end_ts + (2 * 3600);
-            } else {
-                $jwt_expiration_hours = $this->settings['jwt_expiration_hours'] ?? 24;
-                $exp                  = time() + ($jwt_expiration_hours * 3600);
-            }
-        } else {
-            $jwt_expiration_hours = $this->settings['jwt_expiration_hours'] ?? 24;
-            $exp                  = time() + ($jwt_expiration_hours * 3600);
         }
 
         $random_jti  = uniqid('jwt_', true);
@@ -213,7 +215,18 @@ class LEM_Mux_Provider implements LEM_Streaming_Provider_Interface {
         try {
             $jwt = \Firebase\JWT\JWT::encode($payload, base64_decode($private_key), 'RS256');
 
-            $this->plugin->store_jwt($random_jti, $hash_jti, $jwt, $email, $event_id, $payment_id, $ip, gmdate('Y-m-d H:i:s', $exp));
+            // Fills in the entitlement row written at purchase time when there is
+            // one, so a ticket stays one row rather than becoming two.
+            $this->plugin->record_playback_token(
+                $email,
+                $event_id,
+                $random_jti,
+                $jwt,
+                $hash_jti,
+                $payment_id,
+                $ip,
+                gmdate('Y-m-d H:i:s', $exp)
+            );
 
             $jwt_redis_data = array(
                 'jti'                     => $random_jti,
@@ -685,13 +698,22 @@ class LEM_Mux_Provider implements LEM_Streaming_Provider_Interface {
     public function handle_webhook($payload, $signature = null) {
         $webhook_secret = $this->settings['mux_webhook_secret'] ?? '';
 
-        if (!empty($webhook_secret)) {
-            if (empty($signature)) {
-                return new WP_Error('missing_signature', 'Mux signature header missing');
-            }
-            if (!$this->verify_mux_signature($payload, $signature, $webhook_secret)) {
-                return new WP_Error('invalid_signature', 'Mux webhook signature invalid');
-            }
+        // Fails closed. The route is public (permission_callback __return_true),
+        // so an unset secret previously meant any POST was processed as genuine
+        // and could create lem_event posts via maybe_create_past_stream_post().
+        if (empty($webhook_secret)) {
+            return new WP_Error(
+                'no_secret',
+                'Mux webhook secret is not configured. Set it under Services → Mux before enabling the webhook.'
+            );
+        }
+
+        if (empty($signature)) {
+            return new WP_Error('missing_signature', 'Mux signature header missing');
+        }
+
+        if (!$this->verify_mux_signature($payload, $signature, $webhook_secret)) {
+            return new WP_Error('invalid_signature', 'Mux webhook signature invalid');
         }
 
         $data = json_decode($payload, true);
@@ -778,6 +800,15 @@ class LEM_Mux_Provider implements LEM_Streaming_Provider_Interface {
         if (empty($parts['t']) || empty($parts['v1'])) {
             return false;
         }
+
+        // Reject stale timestamps so a captured delivery cannot be replayed
+        // indefinitely. Five minutes matches Stripe's default tolerance.
+        $tolerance = (int) apply_filters('lem_mux_webhook_tolerance', 5 * MINUTE_IN_SECONDS);
+        $timestamp = (int) $parts['t'];
+        if ($tolerance > 0 && ($timestamp <= 0 || abs(time() - $timestamp) > $tolerance)) {
+            return false;
+        }
+
         $signed = $parts['t'] . '.' . $payload;
         $expected = hash_hmac('sha256', $signed, $secret);
         return hash_equals($expected, $parts['v1']);
@@ -953,8 +984,66 @@ class LEM_Mux_Provider implements LEM_Streaming_Provider_Interface {
         return empty($errors) ? true : $errors;
     }
 
+    /**
+     * Mux playback tokens are RS256-signed and validated at Mux's edge. There is
+     * no revocation API and swapping the token mid-playback is not safe, so the
+     * token is issued once and covers the event.
+     */
     public function supports_token_refresh() {
         return false;
+    }
+
+    public function get_token_settings_fields(): array {
+        return array();
+    }
+
+    /**
+     * Dry-run the parts of minting that can fail on configuration alone, without
+     * issuing a token or calling Mux. Catches the failure that would otherwise
+     * only appear when the audience clicks their links.
+     *
+     * @param int $event_id Event post ID.
+     * @return true|WP_Error
+     */
+    public function preflight($event_id) {
+        if (!class_exists('\Firebase\JWT\JWT')) {
+            return new WP_Error('no_jwt_lib', 'Firebase JWT library not loaded — run composer install in the plugin directory.');
+        }
+
+        $key_id      = $this->settings['mux_key_id']      ?? '';
+        $private_key = $this->settings['mux_private_key'] ?? '';
+
+        if (empty($key_id) || empty($private_key)) {
+            return new WP_Error('no_signing_key', 'Mux signing key ID or private key is missing.');
+        }
+
+        $decoded = base64_decode($private_key, true);
+        if ($decoded === false) {
+            return new WP_Error('bad_signing_key', 'Mux private key is not valid base64 — paste the key exactly as Mux supplies it.');
+        }
+
+        if (!function_exists('openssl_pkey_get_private')) {
+            return true; // Cannot verify without OpenSSL; minting may still work.
+        }
+
+        $key = @openssl_pkey_get_private($decoded);
+        if ($key === false) {
+            return new WP_Error('bad_signing_key', 'Mux private key could not be parsed — playback tokens cannot be signed.');
+        }
+
+        return true;
+    }
+
+    public function describe_token_lifetime(): string {
+        $buffer = class_exists('LEM_Event_Window')
+            ? LEM_Event_Window::buffer_seconds() / HOUR_IN_SECONDS
+            : 2;
+
+        return sprintf(
+            /* translators: %s: buffer in hours. */
+            __('Event end + %sh, minted at doors. Fixed — cannot be revoked once issued.', 'lem-adaptors'),
+            number_format_i18n($buffer, 1)
+        );
     }
 
     public function get_extra_tabs() {

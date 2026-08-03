@@ -299,39 +299,68 @@ class LEM_PayPal_Provider implements LEM_Payment_Provider_Interface {
             return new \WP_Error('invalid_payload', 'Empty or invalid PayPal webhook payload.');
         }
 
-        // Verify signature via PayPal API when webhook_id is set.
-        if (!empty($webhook_id)) {
-            $token = $this->get_access_token();
-            if (!is_wp_error($token)) {
-                $verify_body = array(
-                    'auth_algo'         => $_SERVER['HTTP_PAYPAL_AUTH_ALGO']         ?? '',
-                    'cert_url'          => $_SERVER['HTTP_PAYPAL_CERT_URL']          ?? '',
-                    'transmission_id'   => $_SERVER['HTTP_PAYPAL_TRANSMISSION_ID']   ?? '',
-                    'transmission_sig'  => $_SERVER['HTTP_PAYPAL_TRANSMISSION_SIG']  ?? '',
-                    'transmission_time' => $_SERVER['HTTP_PAYPAL_TRANSMISSION_TIME'] ?? '',
-                    'webhook_id'        => $webhook_id,
-                    'webhook_event'     => $body_array,
-                );
+        // ── Signature verification — fails closed ─────────────────────────────
+        //
+        // Every branch below returns an error rather than falling through.
+        // Previously an unset webhook id, a failed token fetch, or a transient
+        // network error to PayPal all skipped verification and let the payload be
+        // treated as trusted. Combined with header-based provider routing in core,
+        // that let an unauthenticated POST carrying a PayPal-Transmission-Sig
+        // header mint a ticket for any event and email.
+        if (empty($webhook_id)) {
+            return new \WP_Error(
+                'no_secret',
+                'PayPal webhook ID is not configured. Set it under Services → PayPal before enabling the webhook.'
+            );
+        }
 
-                $verify_resp = wp_remote_post(
-                    $this->base_url() . '/v1/notifications/verify-webhook-signature',
-                    array(
-                        'headers' => array(
-                            'Authorization' => 'Bearer ' . $token,
-                            'Content-Type'  => 'application/json',
-                        ),
-                        'body'    => wp_json_encode($verify_body),
-                        'timeout' => 15,
-                    )
-                );
+        $token = $this->get_access_token();
+        if (is_wp_error($token)) {
+            return new \WP_Error(
+                'verification_unavailable',
+                'Could not obtain a PayPal access token to verify this webhook: ' . $token->get_error_message()
+            );
+        }
 
-                if (!is_wp_error($verify_resp)) {
-                    $v = json_decode(wp_remote_retrieve_body($verify_resp), true);
-                    if (($v['verification_status'] ?? '') !== 'SUCCESS') {
-                        return new \WP_Error('invalid_signature', 'PayPal webhook signature verification failed.');
-                    }
-                }
+        $verify_body = array(
+            'auth_algo'         => $_SERVER['HTTP_PAYPAL_AUTH_ALGO']         ?? '',
+            'cert_url'          => $_SERVER['HTTP_PAYPAL_CERT_URL']          ?? '',
+            'transmission_id'   => $_SERVER['HTTP_PAYPAL_TRANSMISSION_ID']   ?? '',
+            'transmission_sig'  => $_SERVER['HTTP_PAYPAL_TRANSMISSION_SIG']  ?? '',
+            'transmission_time' => $_SERVER['HTTP_PAYPAL_TRANSMISSION_TIME'] ?? '',
+            'webhook_id'        => $webhook_id,
+            'webhook_event'     => $body_array,
+        );
+
+        foreach (array('auth_algo', 'cert_url', 'transmission_id', 'transmission_sig', 'transmission_time') as $required) {
+            if ($verify_body[$required] === '') {
+                return new \WP_Error('missing_signature', 'PayPal webhook is missing required signature headers.');
             }
+        }
+
+        $verify_resp = wp_remote_post(
+            $this->base_url() . '/v1/notifications/verify-webhook-signature',
+            array(
+                'headers' => array(
+                    'Authorization' => 'Bearer ' . $token,
+                    'Content-Type'  => 'application/json',
+                ),
+                'body'    => wp_json_encode($verify_body),
+                'timeout' => 15,
+            )
+        );
+
+        if (is_wp_error($verify_resp)) {
+            // PayPal retries on a non-2xx, so refusing here loses nothing.
+            return new \WP_Error(
+                'verification_unavailable',
+                'Could not reach PayPal to verify this webhook: ' . $verify_resp->get_error_message()
+            );
+        }
+
+        $v = json_decode(wp_remote_retrieve_body($verify_resp), true);
+        if (($v['verification_status'] ?? '') !== 'SUCCESS') {
+            return new \WP_Error('invalid_signature', 'PayPal webhook signature verification failed.');
         }
 
         $event_type = $body_array['event_type'] ?? '';
