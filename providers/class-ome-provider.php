@@ -19,9 +19,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 if (defined('LEM_PLUGIN_DIR')) {
     require_once LEM_PLUGIN_DIR . 'services/streaming/class-streaming-provider-interface.php';
+    require_once LEM_PLUGIN_DIR . 'services/streaming/class-abstract-streaming-provider.php';
 }
 
-class LEM_OME_Provider implements LEM_Streaming_Provider_Interface {
+class LEM_OME_Provider extends LEM_Abstract_Streaming_Provider {
 
     private $plugin;
     private $settings;
@@ -554,11 +555,62 @@ class LEM_OME_Provider implements LEM_Streaming_Provider_Interface {
             $errors[] = 'Application Name is required.';
         }
 
+        // The refresh interval must be shorter than the signed-URL lifetime, or
+        // playback drops on every cycle. Only this provider knows the units both
+        // values are in, which is why the check cannot live in core.
+        $ttl     = (int) ( $settings[ self::SETTING_TOKEN_TTL ] ?? $this->settings[ self::SETTING_TOKEN_TTL ] ?? 60 );
+        $refresh = isset( $settings['ome_refresh_interval'] ) ? (int) $settings['ome_refresh_interval'] : null;
+
+        if ( $ttl < 1 || $ttl > 1440 ) {
+            $errors[] = 'Signed URL lifetime must be between 1 and 1440 minutes.';
+        }
+
+        if ( $refresh !== null ) {
+            if ( $refresh < 1 ) {
+                $errors[] = 'Refresh interval must be at least 1 minute.';
+            } elseif ( $refresh >= $ttl ) {
+                $errors[] = 'Refresh interval must be shorter than the signed URL lifetime, or playback drops every cycle.';
+            }
+        }
+
         return empty( $errors ) ? true : $errors;
     }
 
+    /**
+     * OME Signed Policy URLs are short-lived and re-issued by the client while
+     * the stream plays, so the player must refresh them mid-session.
+     */
     public function supports_token_refresh() {
-        return false;
+        return true;
+    }
+
+    public function get_token_settings_fields(): array {
+        return array(
+            array(
+                'key'         => self::SETTING_TOKEN_TTL,
+                'label'       => 'Signed URL lifetime (minutes)',
+                'type'        => 'number',
+                'description' => 'How long a signed playback URL stays valid. Shorter means revocation takes effect sooner.',
+            ),
+            array(
+                'key'         => 'ome_refresh_interval',
+                'label'       => 'Refresh every (minutes)',
+                'type'        => 'number',
+                'description' => 'How often the player fetches a fresh URL. Must be shorter than the lifetime above.',
+            ),
+        );
+    }
+
+    public function describe_token_lifetime(): string {
+        $ttl     = (int) ($this->settings[ self::SETTING_TOKEN_TTL ] ?? 60);
+        $refresh = (int) ($this->settings['ome_refresh_interval'] ?? max(1, (int) floor($ttl * 0.75)));
+
+        return sprintf(
+            /* translators: 1: TTL minutes, 2: refresh minutes. */
+            __('%1$d min, refreshed every %2$d min.', 'lem-adaptors'),
+            $ttl,
+            $refresh
+        );
     }
 
     public function get_extra_tabs() {
